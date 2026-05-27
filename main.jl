@@ -458,16 +458,30 @@ function grad(qn::QNode, params::Vector{Float64})
     # ── Per-gate parameter-shift ──────────────────────────────────────────────
     # ops is a shallow copy; gate structs are immutable so ops[i] = ... never
     # aliases back into tape.operations.
-    ops      = tape.operations
-    gradient = Float64[]
-    for (i, gate) in enumerate(tape.operations)
-        sp = shift_params(gate)
-        # If gate has no shift_params, it's not a source of trainable parameters, so skip it.
-        sp === nothing && continue
-        r, s    = sp
-        f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev)
-        f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev)
-        push!(gradient, r * (f_plus - f_minus))
+    ops = tape.operations
+    param_gate_idxs = Int[]
+    for (i, gate) in enumerate(ops)
+        shift_params(gate) === nothing || push!(param_gate_idxs, i)
+    end
+
+    gradient = Vector{Float64}(undef, length(param_gate_idxs))
+    if Base.Threads.nthreads() == 1 || length(param_gate_idxs) <= 1
+        for (t, i) in enumerate(param_gate_idxs)
+            gate    = ops[i]
+            r, s    = shift_params(gate)
+            f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev)
+            f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev)
+            gradient[t] = r * (f_plus - f_minus)
+        end
+    else
+        Base.Threads.@threads for t in eachindex(param_gate_idxs)
+            i       = param_gate_idxs[t]
+            gate    = ops[i]
+            r, s    = shift_params(gate)
+            f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev)
+            f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev)
+            gradient[t] = r * (f_plus - f_minus)
+        end
     end
     return gradient
 end
