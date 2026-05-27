@@ -217,11 +217,50 @@ function apply_1q_gate!(G::M, ψ::Vector{ComplexF64}, wire::Int, n::Int) where {
     end
 end
 
+# apply_2q_gate!
+#   Dedicated 2-qubit kernel: no heap allocations, no dynamic offset arrays.
+#   w0 = MSB wire (gate_wires[1]), w1 = LSB wire (gate_wires[2]).
+#
+#   Gate matrix convention (matching gate_offsets in the generic kernel):
+#     column/row r encodes the two-qubit basis state big-endian over (w0, w1):
+#       r=0 (00): neither bit set  → offset 0        → i00
+#       r=1 (01): w1 bit set only  → offset s1       → i01
+#       r=2 (10): w0 bit set only  → offset s0       → i10
+#       r=3 (11): both bits set    → offset s0+s1    → i11
+#
+#   Spectator enumeration: three-level loop over all base indices
+#   with both bit (w0-1) = 0 and bit (w1-1) = 0, totalling 2^(n-2) bases.
+#   Let s_hi = max(s0,s1), s_lo = min(s0,s1):
+#     - outer iterates super-blocks of size 2·s_hi
+#     - mid   iterates sub-blocks of size 2·s_lo within each s_hi half-block
+#     - inner iterates individual positions within each s_lo half-block
+function apply_2q_gate!(G::M, ψ::Vector{ComplexF64}, w0::Int, w1::Int, n::Int) where {M<:AbstractMatrix{ComplexF64}}
+    s0   = 1 << (w0 - 1)
+    s1   = 1 << (w1 - 1)
+    s_hi = max(s0, s1)
+    s_lo = min(s0, s1)
+    @inbounds for outer in 0:(2^n ÷ (2 * s_hi) - 1)
+        for mid in 0:(s_hi ÷ (2 * s_lo) - 1)
+            for inner in 0:(s_lo - 1)
+                base = outer * 2 * s_hi + mid * 2 * s_lo + inner
+                i00  = base + 1
+                i01  = base + s1 + 1
+                i10  = base + s0 + 1
+                i11  = base + s0 + s1 + 1
+                a00, a01, a10, a11 = ψ[i00], ψ[i01], ψ[i10], ψ[i11]
+                ψ[i00] = G[1,1]*a00 + G[1,2]*a01 + G[1,3]*a10 + G[1,4]*a11
+                ψ[i01] = G[2,1]*a00 + G[2,2]*a01 + G[2,3]*a10 + G[2,4]*a11
+                ψ[i10] = G[3,1]*a00 + G[3,2]*a01 + G[3,3]*a10 + G[3,4]*a11
+                ψ[i11] = G[4,1]*a00 + G[4,2]*a01 + G[4,3]*a10 + G[4,4]*a11
+            end
+        end
+    end
+end
+
 # apply_kq_gate!
-#   In-place k-qubit gate using stride-based gather/scatter.
+#   In-place k-qubit gate (k ≥ 3) using stride-based gather/scatter.
 #   gate_wires[1] is the MSB of the gate's row/col index (big-endian convention).
 #   buf is a scratch buffer of length 2^k, pre-allocated by the caller.
-#   Here the gate acts on k qubits, so we gather 2^k amplitudes into the buffer, apply G, and scatter back.
 function apply_kq_gate!(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64}) where {M<:AbstractMatrix{ComplexF64}}
     k = length(gate_wires)
     # offset in ψ for gate-subspace basis state r (0-based, big-endian across gate_wires)
@@ -252,11 +291,13 @@ function apply_kq_gate!(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n
 end
 
 # apply_gate!
-#   In-place dispatcher: routes to the 1-qubit specialisation or the general k-qubit path.
+#   In-place dispatcher: 1-qubit → apply_1q_gate!, 2-qubit → apply_2q_gate!, k≥3 → apply_kq_gate!.
 function apply_gate!(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64}) where {M<:AbstractMatrix{ComplexF64}}
     @assert size(G) == (2^length(gate_wires), 2^length(gate_wires))
     if length(gate_wires) == 1
         apply_1q_gate!(G, ψ, gate_wires[1], n)
+    elseif length(gate_wires) == 2
+        apply_2q_gate!(G, ψ, gate_wires[1], gate_wires[2], n)
     else
         apply_kq_gate!(G, ψ, gate_wires, n, buf)
     end
