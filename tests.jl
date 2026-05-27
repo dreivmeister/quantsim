@@ -128,49 +128,53 @@ py_vec(x)  = pyconvert(Vector{Float64},  x)
 # Julia (quantsim) circuit definitions
 # ─────────────────────────────────────────────────────────────────────────────
 function _jl_rx_z(p)
-    RX(p[1], wires="a")
-    expval(PauliZ(wires="a"))
+    TypedTape((RX(p[1], wires="a"),), (expval(PauliZ(wires="a")),))
 end
 
 function _jl_ry_z(p)
-    RY(p[1], wires="a")
-    expval(PauliZ(wires="a"))
+    TypedTape((RY(p[1], wires="a"),), (expval(PauliZ(wires="a")),))
 end
 
 function _jl_h_z(p)
-    H(wires="a")
-    expval(PauliZ(wires="a"))
+    TypedTape((H(wires="a"),), (expval(PauliZ(wires="a")),))
 end
 
 function _jl_h_x(p)
-    H(wires="a")
-    expval(PauliX(wires="a"))
+    TypedTape((H(wires="a"),), (expval(PauliX(wires="a")),))
 end
 
 function _jl_rx_var(p)
-    RX(p[1], wires="a")
-    var(PauliZ(wires="a"))
+    TypedTape((RX(p[1], wires="a"),), (var(PauliZ(wires="a")),))
 end
 
 function _jl_bell(p)
-    H(wires="a")
-    CNOT(wires=["a","b"])
-    probs(wires=["a","b"])
+    TypedTape((
+        H(wires="a"),
+        CNOT(wires=["a","b"]),
+    ), (
+        probs(wires=["a","b"]),
+    ))
 end
 
 function _jl_main(p)
-    H(wires="a")
-    RX(p[1], wires="b")
-    CNOT(wires=["a","b"])
-    RY(p[2], wires="a")
-    expval(PauliZ(wires="b"))
+    TypedTape((
+        H(wires="a"),
+        RX(p[1], wires="b"),
+        CNOT(wires=["a","b"]),
+        RY(p[2], wires="a"),
+    ), (
+        expval(PauliZ(wires="b")),
+    ))
 end
 
 function _jl_rxryrx(p)
-    RX(p[1], wires="a")
-    RY(p[2], wires="a")
-    RX(p[3], wires="a")
-    expval(PauliZ(wires="a"))
+    TypedTape((
+        RX(p[1], wires="a"),
+        RY(p[2], wires="a"),
+        RX(p[3], wires="a"),
+    ), (
+        expval(PauliZ(wires="a")),
+    ))
 end
 
 const qn_rx     = QNode(_jl_rx_z,   Device(["a"]))

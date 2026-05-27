@@ -15,6 +15,7 @@
 # =============================================================================
 
 using LinearAlgebra
+using StaticArrays
 using BenchmarkTools
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -28,12 +29,12 @@ using BenchmarkTools
 abstract type AbstractGate end
 # Interface every concrete gate must satisfy:
 #   gate_matrix(g)::Matrix{ComplexF64}  – unitary matrix applied to the state
-gate_matrix(g::AbstractGate)::Matrix{ComplexF64} = error("gate_matrix not implemented for $(typeof(g))")
+# gate_matrix(g::AbstractGate)::AbstractMatrix{ComplexF64} = error("gate_matrix not implemented for $(typeof(g))")
 
 # ── Parametric gates ──────────────────────────────────────────────────────────
 # θ is Float64 now; swapping to a Dual type later enables ForwardDiff.
 
-rx_matrix(θ::Real) = ComplexF64[
+rx_matrix(θ::Real) = @SMatrix ComplexF64[
      cos(θ/2)      -im*sin(θ/2);
     -im*sin(θ/2)    cos(θ/2)
 ]
@@ -48,7 +49,7 @@ struct RXGate <: AbstractGate
 end
 gate_matrix(g::RXGate) = rx_matrix(g.θ)
 
-ry_matrix(θ::Real) = ComplexF64[
+ry_matrix(θ::Real) = @SMatrix ComplexF64[
     cos(θ/2)  -sin(θ/2);
     sin(θ/2)   cos(θ/2)
 ]
@@ -65,7 +66,7 @@ gate_matrix(g::RYGate) = ry_matrix(g.θ)
 
 # ── Non-parametric gates ──────────────────────────────────────────────────────
 
-const CNOT_MATRIX = ComplexF64[
+const CNOT_MATRIX = @SMatrix ComplexF64[
     1 0 0 0;
     0 1 0 0;
     0 0 0 1;
@@ -81,7 +82,7 @@ struct CNOTGate <: AbstractGate
 end
 gate_matrix(::CNOTGate) = CNOT_MATRIX
 
-const HADAMARD_MATRIX = ComplexF64[1 1; 1 -1] / sqrt(2)
+const HADAMARD_MATRIX = @SMatrix(ComplexF64[1 1; 1 -1]) / sqrt(2)
 
 struct HGate <: AbstractGate
     wires::Vector{String}
@@ -110,12 +111,12 @@ shift_gate(g::AbstractGate, ::Real)  = g
 # 2. Observables
 # ─────────────────────────────────────────────────────────────────────────────
 
-const PAULI_X = ComplexF64[0 1; 1 0]
-const PAULI_Y = ComplexF64[0 -im; im 0]
-const PAULI_Z = ComplexF64[1 0; 0 -1]
+const PAULI_X = @SMatrix ComplexF64[0 1; 1 0]
+const PAULI_Y = @SMatrix ComplexF64[0 -im; im 0]
+const PAULI_Z = @SMatrix ComplexF64[1 0; 0 -1]
 
-struct Observable
-    matrix::Matrix{ComplexF64}
+struct Observable{M<:AbstractMatrix{ComplexF64}}
+    matrix::M
     wires::Vector{String}
 end
 
@@ -133,12 +134,12 @@ PauliZ(; wires) = Observable(PAULI_Z, _wire_vec(wires))
 
 abstract type AbstractMeasurement end
 
-struct ExpvalProcess <: AbstractMeasurement
-    observable::Observable
+struct ExpvalProcess{M<:AbstractMatrix{ComplexF64}} <: AbstractMeasurement
+    observable::Observable{M}
 end
 
-struct VarProcess <: AbstractMeasurement
-    observable::Observable
+struct VarProcess{M<:AbstractMatrix{ComplexF64}} <: AbstractMeasurement
+    observable::Observable{M}
 end
 
 # probs: stores which wires to compute marginal probabilities over
@@ -155,37 +156,34 @@ measurement_wires(m::ProbsProcess)  = m.wires
 # 4. Tape  –  ordered record of gates + measurements
 # ─────────────────────────────────────────────────────────────────────────────
 
-mutable struct Tape
-    operations::Vector{AbstractGate}
-    measurements::Vector{AbstractMeasurement}
+struct TypedTape{Ops<:Tuple, Meas<:Tuple}
+    operations::Ops
+    measurements::Meas
 end
 
-Tape() = Tape(AbstractGate[], AbstractMeasurement[])
+TypedTape(operations::Ops, measurements::Meas) where {Ops<:Tuple, Meas<:Tuple} =
+    TypedTape{Ops, Meas}(operations, measurements)
+
+TypedTape() = TypedTape((), ())
+
+const Tape = TypedTape
+
+function _replace_tuple(t::Tuple, idx::Int, value)
+    return Base.setindex(t, value, idx)
+end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Gate and measurement functions  –  called inside a quantum function, push structs onto the active tape
+# 5. Gate and measurement functions  –  pure constructors used when building a TypedTape
 # ─────────────────────────────────────────────────────────────────────────────
 
-RX(θ::Real; wires)  = push!(task_local_storage(:active_tape).operations, RXGate(Float64(θ),  _wire_vec(wires)))
-RY(θ::Real; wires)  = push!(task_local_storage(:active_tape).operations, RYGate(Float64(θ),  _wire_vec(wires)))
-CNOT(; wires)       = push!(task_local_storage(:active_tape).operations, CNOTGate(_wire_vec(wires)))
-H(; wires)          = push!(task_local_storage(:active_tape).operations, HGate(_wire_vec(wires)))
+RX(θ::Real; wires)  = RXGate(Float64(θ), _wire_vec(wires))
+RY(θ::Real; wires)  = RYGate(Float64(θ), _wire_vec(wires))
+CNOT(; wires)       = CNOTGate(_wire_vec(wires))
+H(; wires)          = HGate(_wire_vec(wires))
 
-# expval / var / probs: record the measurement and return nothing (QNode collects results).
-function expval(obs::Observable)
-    push!(task_local_storage(:active_tape).measurements, ExpvalProcess(obs))
-    return nothing
-end
-
-function var(obs::Observable)
-    push!(task_local_storage(:active_tape).measurements, VarProcess(obs))
-    return nothing
-end
-
-function probs(; wires)
-    push!(task_local_storage(:active_tape).measurements, ProbsProcess(_wire_vec(wires)))
-    return nothing
-end
+expval(obs::Observable) = ExpvalProcess(obs)
+var(obs::Observable)    = VarProcess(obs)
+probs(; wires)          = ProbsProcess(_wire_vec(wires))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Device  –  statevector simulator
@@ -196,7 +194,7 @@ struct Device
     wire_map::Dict{String,Int}     # wire label → 1-based qubit index
 end
 
-function Device(wires::AbstractVector{String})
+function Device(wires::Vector{String})
     ws = collect(wires)
     Device(ws, Dict{String,Int}(w => i for (i, w) in enumerate(ws)))
 end
@@ -206,7 +204,7 @@ end
 #   Iterates over all 2^(n-1) pairs (i0, i1) that differ only in bit `wire-1`, applying G
 #   to each pair without any permutation or allocation. We only need to compute the action on the wires qubit.
 #   The relevant pairs are at known offsets in the state vector, so we can compute i0 and i1 directly from the loop indices.
-function apply_1q_gate!(G::Matrix{ComplexF64}, ψ::Vector{ComplexF64}, wire::Int, n::Int)
+function apply_1q_gate!(G::M, ψ::Vector{ComplexF64}, wire::Int, n::Int) where {M<:AbstractMatrix{ComplexF64}}
     s = 1 << (wire - 1)      # stride = 2^(wire-1)
     @inbounds for outer in 0:(2^n ÷ (2s) - 1)
         for inner in 0:(s - 1)
@@ -224,7 +222,7 @@ end
 #   gate_wires[1] is the MSB of the gate's row/col index (big-endian convention).
 #   buf is a scratch buffer of length 2^k, pre-allocated by the caller.
 #   Here the gate acts on k qubits, so we gather 2^k amplitudes into the buffer, apply G, and scatter back.
-function apply_kq_gate!(G::Matrix{ComplexF64}, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64})
+function apply_kq_gate!(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64}) where {M<:AbstractMatrix{ComplexF64}}
     k = length(gate_wires)
     # offset in ψ for gate-subspace basis state r (0-based, big-endian across gate_wires)
     gate_offsets = [sum(((r >> (k-j)) & 1) * (1 << (gate_wires[j]-1)) for j in 1:k)
@@ -255,7 +253,7 @@ end
 
 # apply_gate!
 #   In-place dispatcher: routes to the 1-qubit specialisation or the general k-qubit path.
-function apply_gate!(G::Matrix{ComplexF64}, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64})
+function apply_gate!(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int, buf::Vector{ComplexF64}) where {M<:AbstractMatrix{ComplexF64}}
     @assert size(G) == (2^length(gate_wires), 2^length(gate_wires))
     if length(gate_wires) == 1
         apply_1q_gate!(G, ψ, gate_wires[1], n)
@@ -266,7 +264,7 @@ end
 
 # apply_gate  (non-mutating wrapper used by measurements)
 #   Allocates a copy and delegates to apply_gate!, preserving the original ψ.
-function apply_gate(G::Matrix{ComplexF64}, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int)
+function apply_gate(G::M, ψ::Vector{ComplexF64}, gate_wires::Vector{Int}, n::Int) where {M<:AbstractMatrix{ComplexF64}}
     ψ_out = copy(ψ)
     buf   = Vector{ComplexF64}(undef, 2^length(gate_wires))
     apply_gate!(G, ψ_out, gate_wires, n, buf)
@@ -274,14 +272,14 @@ function apply_gate(G::Matrix{ComplexF64}, ψ::Vector{ComplexF64}, gate_wires::V
 end
 
 # ⟨ψ|O|ψ⟩
-function apply_measurement(meas::ExpvalProcess, ψ::Vector{ComplexF64}, wire_map::AbstractDict, n::Int)
+function apply_measurement(meas::ExpvalProcess, ψ::Vector{ComplexF64}, wire_map::Dict{String,Int}, n::Int)
     wire_idx = get_wire_idxs(wire_map, meas.observable.wires)
     Oψ       = apply_gate(meas.observable.matrix, ψ, wire_idx, n)
     return real(dot(ψ, Oψ))
 end
 
 # ⟨ψ|O²|ψ⟩ - ⟨ψ|O|ψ⟩²
-function apply_measurement(meas::VarProcess, ψ::Vector{ComplexF64}, wire_map::AbstractDict, n::Int)
+function apply_measurement(meas::VarProcess, ψ::Vector{ComplexF64}, wire_map::Dict{String,Int}, n::Int)
     wire_idx = get_wire_idxs(wire_map, meas.observable.wires)
     Oψ       = apply_gate(meas.observable.matrix, ψ, wire_idx, n)
     O2ψ      = apply_gate(meas.observable.matrix, Oψ, wire_idx, n)
@@ -291,7 +289,7 @@ end
 # P(x) = |⟨x|ψ⟩|² for each computational basis state x of the selected wires.
 # Iterates over all 2^n basis states, extracts the selected-wire bits (big-endian),
 # and accumulates |amplitude|² into the corresponding output bin.
-function apply_measurement(meas::ProbsProcess, ψ::Vector{ComplexF64}, wire_map::AbstractDict, n::Int)
+function apply_measurement(meas::ProbsProcess, ψ::Vector{ComplexF64}, wire_map::Dict{String,Int}, n::Int)
     wire_idx = get_wire_idxs(wire_map, meas.wires)
     k = length(wire_idx)
     probs_vec = zeros(Float64, 2^k)
@@ -309,7 +307,7 @@ end
 # 7. QNode  –  binds a quantum function to a device
 # ─────────────────────────────────────────────────────────────────────────────
 
-function validate_tape(tape::Tape, dev::Device)
+function validate_tape(tape::TypedTape, dev::Device)
     for gate in tape.operations
         for w in gate.wires
             haskey(dev.wire_map, w) || error(
@@ -329,36 +327,36 @@ function validate_tape(tape::Tape, dev::Device)
 end
 
 # Convert wire labels to their corresponding indices in the state vector.
-function get_wire_idxs(wire_map::AbstractDict, wires::AbstractVector)
-    return [wire_map[w] for w in wires]
+function get_wire_idxs(wire_map::Dict{String,Int}, wires::Vector{String})
+    return Int[wire_map[w] for w in wires]
 end
 
-struct QNode
-    func::Function
+struct QNode{F<:Function}
+    func::F
     device::Device
 end
 
-# build_tape  –  dry-run: execute the quantum function to populate a Tape
-#   without touching the statevector simulator.  Used by the QNode callable
-#   and by grad for pre-flight validation.
+# build_tape  –  execute the quantum function and require it to return a TypedTape.
+#   Used by the QNode callable and by grad for pre-flight validation.
 function build_tape(qn::QNode, params::Vector{Float64})
-    tape = Tape()
-    task_local_storage(:active_tape, tape) do
-        qn.func(params)
-    end
+    tape = qn.func(params)
+    tape isa TypedTape || error(
+        "Quantum function must return a TypedTape, got $(typeof(tape)). " *
+        "Construct and return the tape directly instead of using side effects."
+    )
     return tape
 end
 
 # execute_tape  –  run a pre-built tape on dev and return measurement results.
 #   Assumes the tape has already been validated. Used by the QNode callable
 #   and by grad to evaluate shifted tapes without re-executing qfunc.
-function execute_tape(tape::Tape, dev::Device)
+function execute_tape(tape::TypedTape, dev::Device)
     n   = length(dev.wires)
     ψ   = zeros(ComplexF64, 2^n)
     ψ[1] = 1.0
     max_k = isempty(tape.operations) ? 1 : maximum(length(g.wires) for g in tape.operations)
     buf   = Vector{ComplexF64}(undef, 2^max_k)
-    for gate in tape.operations
+    foreach(tape.operations) do gate
         wire_idx = get_wire_idxs(dev.wire_map, gate.wires)
         apply_gate!(gate_matrix(gate), ψ, wire_idx, n, buf)
     end
@@ -419,18 +417,15 @@ function grad(qn::QNode, params::Vector{Float64})
     # ── Per-gate parameter-shift ──────────────────────────────────────────────
     # ops is a shallow copy; gate structs are immutable so ops[i] = ... never
     # aliases back into tape.operations.
-    ops      = copy(tape.operations)
+    ops      = tape.operations
     gradient = Float64[]
     for (i, gate) in enumerate(tape.operations)
         sp = shift_params(gate)
         # If gate has no shift_params, it's not a source of trainable parameters, so skip it.
         sp === nothing && continue
         r, s    = sp
-        ops[i]  = shift_gate(gate,  s)
-        f_plus  = execute_tape(Tape(ops, tape.measurements), dev)
-        ops[i]  = shift_gate(gate, -s)
-        f_minus = execute_tape(Tape(ops, tape.measurements), dev)
-        ops[i]  = gate                  # restore
+        f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev)
+        f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev)
         push!(gradient, r * (f_plus - f_minus))
     end
     return gradient
