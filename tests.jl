@@ -309,6 +309,24 @@ const ATOL = 1e-6
         @test jl_g[1] ≈ -sin(θ) atol=1f-4
     end
 
+    # ── TC12: ForwardDiff single-param matches parameter-shift ──────────────
+    @testset "TC12: grad_ad single-param matches parameter-shift" begin
+        θ = π/4
+        g_shift = grad(qn_rx, [θ])
+        g_ad    = grad_ad(qn_rx, [θ])
+        @test eltype(g_ad) == Float64
+        @test g_ad[1] ≈ g_shift[1] atol=1e-8
+    end
+
+    # ── TC13: ForwardDiff multi-param matches parameter-shift ───────────────
+    @testset "TC13: grad_ad multi-param matches parameter-shift" begin
+        ps      = [0.5, 0.3]
+        g_shift = grad(qn_main, ps)
+        g_ad    = grad_ad(qn_main, ps)
+        @test eltype(g_ad) == Float64
+        @test g_ad ≈ g_shift atol=1e-8
+    end
+
 end # @testset
 
 # =============================================================================

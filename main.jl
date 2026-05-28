@@ -17,6 +17,7 @@
 using LinearAlgebra
 using StaticArrays
 using BenchmarkTools
+import ForwardDiff
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Gate matrices and types  –  each carries its params and computes its matrix lazily
@@ -175,8 +176,14 @@ end
 # 5. Gate and measurement functions  –  pure constructors used when building a TypedTape
 # ─────────────────────────────────────────────────────────────────────────────
 
-RX(θ::Real; wires)  = RXGate(float(θ), _wire_vec(wires))
-RY(θ::Real; wires)  = RYGate(float(θ), _wire_vec(wires))
+# Promote integer angles to Float64 for ergonomics (e.g. RX(1, wires="a")),
+# but leave AbstractFloat and Dual numbers untouched so ForwardDiff can propagate.
+_promote_params(p::Vector{<:AbstractFloat}) = p
+_promote_params(p::Vector{<:Integer})       = float.(p)
+_promote_params(p::Vector)                  = p
+
+RX(θ::Real; wires)  = RXGate(θ isa Integer ? float(θ) : θ, _wire_vec(wires))
+RY(θ::Real; wires)  = RYGate(θ isa Integer ? float(θ) : θ, _wire_vec(wires))
 CNOT(; wires)       = CNOTGate(_wire_vec(wires))
 H(; wires)          = HGate(_wire_vec(wires))
 
@@ -292,7 +299,7 @@ end
 # apply_gate!
 #   In-place dispatcher: 1-qubit → apply_1q_gate!, 2-qubit → apply_2q_gate!, k≥3 → apply_kq_gate!.
 function apply_gate!(G::AbstractMatrix, ψ::Vector{CT}, gate_wires::Vector{Int}, n::Int, buf::Vector{CT}) where {CT<:Complex}
-    G_typed = eltype(G) == CT ? G : convert(Matrix{CT}, G)
+    G_typed = eltype(G) == CT ? G : map(CT, G)
     @assert size(G) == (2^length(gate_wires), 2^length(gate_wires))
     if length(gate_wires) == 1
         apply_1q_gate!(G_typed, ψ, gate_wires[1], n)
@@ -410,7 +417,7 @@ end
 
 # Make QNode callable: circuit([p1, p2, …])
 function (qn::QNode)(params::Vector{<:Real})
-    params_f = float.(params)
+    params_f = _promote_params(params)
     tape = build_tape(qn, params_f)
     validate_tape(tape, qn.device)
     return execute_tape(tape, qn.device, eltype(params_f))
@@ -437,7 +444,7 @@ end
 #   · Every gate whose struct carries a θ field must have shift_params defined.
 function grad(qn::QNode, params::Vector{<:Real})
     # ── Pre-flight validation ─────────────────────────────────────────────────
-    params_f = float.(params)
+    params_f = _promote_params(params)
     T = eltype(params_f)
     tape = build_tape(qn, params_f)
     dev  = qn.device
@@ -488,4 +495,30 @@ function grad(qn::QNode, params::Vector{<:Real})
         end
     end
     return gradient
+end
+
+# grad_ad  –  gradient via ForwardDiff (automatic differentiation).
+#
+#   Computes ∂f/∂params[i] for every element of params simultaneously, using
+#   dual numbers. Requires exactly one expval() measurement (same constraint as
+#   grad). Returns a Vector{Float64} of length(params), one entry per input.
+#
+#   Use this as an independent check against the parameter-shift grad, or when
+#   the circuit contains non-Pauli-rotation gates for which shift_params is not
+#   defined.
+function grad_ad(qn::QNode, params::Vector{<:AbstractFloat})
+    # Validate with a cheap Float64 tape before paying any Dual overhead.
+    tape0 = build_tape(qn, params)
+    validate_tape(tape0, qn.device)
+    length(tape0.measurements) == 1 || error(
+        "grad_ad requires exactly one measurement, got $(length(tape0.measurements)).")
+    tape0.measurements[1] isa ExpvalProcess || error(
+        "grad_ad only supports expval() measurements, got $(typeof(tape0.measurements[1])).")
+
+    return ForwardDiff.gradient(params) do p
+        # eltype(p) is Dual{…} during differentiation; Dual <: Real satisfies
+        # execute_tape's T<:Real constraint.  Constant gate matrices are promoted
+        # lazily to Complex{Dual} via the map(CT, G) path in apply_gate!.
+        execute_tape(qn.func(p), qn.device, eltype(p))
+    end
 end
