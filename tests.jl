@@ -298,6 +298,17 @@ const ATOL = 1e-6
         @test jl_g ≈ pl_g atol=ATOL
     end
 
+    # ── TC11: Float32 parameter path smoke test ─────────────────────────────
+    @testset "TC11: Float32 forward + gradient smoke" begin
+        θ = Float32(π/4)
+        jl = qn_rx(Float32[θ])
+        @test jl ≈ cos(θ) atol=1f-5
+
+        jl_g = grad(qn_rx, Float32[θ])
+        @test eltype(jl_g) == Float32
+        @test jl_g[1] ≈ -sin(θ) atol=1f-4
+    end
+
 end # @testset
 
 # =============================================================================
