@@ -17,6 +17,7 @@
 using LinearAlgebra
 using StaticArrays
 using BenchmarkTools
+using Random
 import ForwardDiff
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,8 +42,8 @@ rx_matrix(θ::T) where {T<:Real} = @SMatrix Complex{T}[
 
 struct RXGate{T<:Real} <: AbstractGate
     θ::T
-    wires::Vector{String}
-    function RXGate(θ::T, wires::Vector{String}) where {T<:Real}
+    wires::Vector{Int}
+    function RXGate(θ::T, wires::Vector{Int}) where {T<:Real}
         length(wires) == 1 || error("RXGate requires exactly 1 wire, got $(length(wires))")
         new{T}(θ, wires)
     end
@@ -56,8 +57,8 @@ ry_matrix(θ::T) where {T<:Real} = @SMatrix Complex{T}[
 
 struct RYGate{T<:Real} <: AbstractGate
     θ::T
-    wires::Vector{String}
-    function RYGate(θ::T, wires::Vector{String}) where {T<:Real}
+    wires::Vector{Int}
+    function RYGate(θ::T, wires::Vector{Int}) where {T<:Real}
         length(wires) == 1 || error("RYGate requires exactly 1 wire, got $(length(wires))")
         new{T}(θ, wires)
     end
@@ -74,8 +75,8 @@ const CNOT_MATRIX = @SMatrix ComplexF64[
 ]
 
 struct CNOTGate <: AbstractGate
-    wires::Vector{String}
-    function CNOTGate(wires::Vector{String})
+    wires::Vector{Int}
+    function CNOTGate(wires::Vector{Int})
         length(wires) == 2 || error("CNOTGate requires exactly 2 wires, got $(length(wires))")
         new(wires)
     end
@@ -85,8 +86,8 @@ gate_matrix(::CNOTGate) = CNOT_MATRIX
 const HADAMARD_MATRIX = @SMatrix(ComplexF64[1 1; 1 -1]) / sqrt(2)
 
 struct HGate <: AbstractGate
-    wires::Vector{String}
-    function HGate(wires::Vector{String})
+    wires::Vector{Int}
+    function HGate(wires::Vector{Int})
         length(wires) == 1 || error("HGate requires exactly 1 wire, got $(length(wires))")
         new(wires)
     end
@@ -117,12 +118,12 @@ const PAULI_Z = @SMatrix ComplexF64[1 0; 0 -1]
 
 struct Observable{M<:AbstractMatrix}
     matrix::M
-    wires::Vector{String}
+    wires::Vector{Int}
 end
 
-# Helper to allow wires="a" or wires=["a","b"] syntax in gate and observable constructors.
-_wire_vec(w::AbstractString)      = String[w]
-_wire_vec(w::AbstractVector)      = convert(Vector{String}, w)
+# Helper to allow wires=1 or wires=[1,2] syntax in gate and observable constructors.
+_wire_vec(w::Integer)      = Int[w]
+_wire_vec(w::AbstractVector) = convert(Vector{Int}, w)
 
 PauliX(; wires) = Observable(PAULI_X, _wire_vec(wires))
 PauliY(; wires) = Observable(PAULI_Y, _wire_vec(wires))
@@ -144,7 +145,7 @@ end
 
 # probs: stores which wires to compute marginal probabilities over
 struct ProbsProcess <: AbstractMeasurement
-    wires::Vector{String}
+    wires::Vector{Int}
 end
 
 # Wire accessor — dispatch so validate_tape doesn't need to know the internal layout
@@ -166,21 +167,15 @@ TypedTape(operations::Ops, measurements::Meas) where {Ops<:Tuple, Meas<:Tuple} =
 
 TypedTape() = TypedTape((), ())
 
-const Tape = TypedTape
-
-function _replace_tuple(t::Tuple, idx::Int, value)
-    return Base.setindex(t, value, idx)
-end
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Gate and measurement functions  –  pure constructors used when building a TypedTape
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Promote integer angles to Float64 for ergonomics (e.g. RX(1, wires="a")),
+# Promote integer angles to Float64 for ergonomics (e.g. RX(1, wires=1)),
 # but leave AbstractFloat and Dual numbers untouched so ForwardDiff can propagate.
+
 _promote_params(p::Vector{<:AbstractFloat}) = p
 _promote_params(p::Vector{<:Integer})       = float.(p)
-_promote_params(p::Vector)                  = p
 
 RX(θ::Real; wires)  = RXGate(θ isa Integer ? float(θ) : θ, _wire_vec(wires))
 RY(θ::Real; wires)  = RYGate(θ isa Integer ? float(θ) : θ, _wire_vec(wires))
@@ -319,16 +314,13 @@ function apply_gate(G::AbstractMatrix, ψ::Vector{CT}, gate_wires::Vector{Int}, 
     return ψ_out
 end
 
-# ⟨ψ|O|ψ⟩
-function apply_measurement(meas::ExpvalProcess, ψ::Vector{CT}, wire_map::Dict{String,Int}, n::Int) where {CT<:Complex}
-    wire_idx = get_wire_idxs(wire_map, meas.observable.wires)
+function apply_measurement(meas::ExpvalProcess, ψ::Vector{CT}, wire_idx::Vector{Int}, n::Int) where {CT<:Complex}
     Oψ       = apply_gate(meas.observable.matrix, ψ, wire_idx, n)
     return real(dot(ψ, Oψ))
 end
 
 # ⟨ψ|O²|ψ⟩ - ⟨ψ|O|ψ⟩²
-function apply_measurement(meas::VarProcess, ψ::Vector{CT}, wire_map::Dict{String,Int}, n::Int) where {CT<:Complex}
-    wire_idx = get_wire_idxs(wire_map, meas.observable.wires)
+function apply_measurement(meas::VarProcess, ψ::Vector{CT}, wire_idx::Vector{Int}, n::Int) where {CT<:Complex}
     Oψ       = apply_gate(meas.observable.matrix, ψ, wire_idx, n)
     O2ψ      = apply_gate(meas.observable.matrix, Oψ, wire_idx, n)
     return real(dot(ψ, O2ψ)) - real(dot(ψ, Oψ))^2
@@ -337,19 +329,8 @@ end
 # P(x) = |⟨x|ψ⟩|² for each computational basis state x of the selected wires.
 # Iterates over all 2^n basis states, extracts the selected-wire bits (big-endian),
 # and accumulates |amplitude|² into the corresponding output bin.
-function apply_measurement(meas::ProbsProcess, ψ::Vector{CT}, wire_map::Dict{String,Int}, n::Int) where {CT<:Complex}
-    wire_idx = get_wire_idxs(wire_map, meas.wires)
-    k = length(wire_idx)
-    RT = typeof(real(zero(CT)))
-    probs_vec = zeros(RT, 2^k)
-    @inbounds for i in 0:2^n-1
-        r = 0
-        for (j, w) in enumerate(wire_idx)
-            r |= ((i >> (w-1)) & 1) << (k-j)   # big-endian: wire_idx[1] = MSB
-        end
-        probs_vec[r+1] += abs2(ψ[i+1])
-    end
-    return probs_vec
+function apply_measurement(meas::ProbsProcess, ψ::Vector{CT}, wire_idx::Vector{Int}, n::Int) where {CT<:Complex}
+    return _measurement_probs(ψ, wire_idx, n)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,25 +340,20 @@ end
 function validate_tape(tape::TypedTape, dev::Device)
     for gate in tape.operations
         for w in gate.wires
-            haskey(dev.wire_map, w) || error(
-                "Gate $(nameof(typeof(gate))) references wire \"$w\" which is not in the device. " *
-                "Available wires: $(dev.wires)"
+            (1 <= w <= length(dev.wires)) || error(
+                "Gate $(nameof(typeof(gate))) references qubit $w which is not in the device. " *
+                "Available qubits: $(dev.wires)"
             )
         end
     end
     for meas in tape.measurements
         for w in measurement_wires(meas)
-            haskey(dev.wire_map, w) || error(
-                "Measurement references wire \"$w\" which is not in the device. " *
-                "Available wires: $(dev.wires)"
+            (1 <= w <= length(dev.wires)) || error(
+                "Measurement references qubit $w which is not in the device. " *
+                "Available qubits: $(dev.wires)"
             )
         end
     end
-end
-
-# Convert wire labels to their corresponding indices in the state vector.
-function get_wire_idxs(wire_map::Dict{String,Int}, wires::Vector{String})
-    return Int[wire_map[w] for w in wires]
 end
 
 struct QNode{F<:Function}
@@ -400,19 +376,22 @@ end
 #   Assumes the tape has already been validated. Used by the QNode callable
 #   and by grad to evaluate shifted tapes without re-executing qfunc.
 function execute_tape(tape::TypedTape, dev::Device, ::Type{T}=Float64) where {T<:Real}
-    n   = length(dev.wires)
-    ψ   = zeros(Complex{T}, 2^n)
-    ψ[1] = 1.0
-    max_k = isempty(tape.operations) ? 1 : maximum(length(g.wires) for g in tape.operations)
-    buf   = Vector{Complex{T}}(undef, 2^max_k)
-    foreach(tape.operations) do gate
-        wire_idx = get_wire_idxs(dev.wire_map, gate.wires)
-        apply_gate!(gate_matrix(gate), ψ, wire_idx, n, buf)
-    end
-    results = map(tape.measurements) do meas
-        apply_measurement(meas, ψ, dev.wire_map, n)
-    end
-    return length(results) == 1 ? only(results) : results
+    machine = Machine(dev, T)
+    return execute_program!(machine, tape; collect_results=true)
+end
+
+@inline function _parameter_shift_component(
+    ops::Tuple,
+    measurements::Tuple,
+    i::Int,
+    dev::Device,
+    ::Type{T},
+) where {T<:Real}
+    gate = ops[i]
+    r, s = shift_params(gate)
+    f_plus = execute_tape(TypedTape(Base.setindex(ops, shift_gate(gate, s), i), measurements), dev, T)
+    f_minus = execute_tape(TypedTape(Base.setindex(ops, shift_gate(gate, -s), i), measurements), dev, T)
+    return r * (f_plus - f_minus)
 end
 
 # Make QNode callable: circuit([p1, p2, …])
@@ -478,20 +457,12 @@ function grad(qn::QNode, params::Vector{<:Real})
     gradient = Vector{T}(undef, length(param_gate_idxs))
     if Base.Threads.nthreads() == 1 || length(param_gate_idxs) <= 1
         for (t, i) in enumerate(param_gate_idxs)
-            gate    = ops[i]
-            r, s    = shift_params(gate)
-            f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev, T)
-            f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev, T)
-            gradient[t] = r * (f_plus - f_minus)
+            gradient[t] = _parameter_shift_component(ops, tape.measurements, i, dev, T)
         end
     else
         Base.Threads.@threads for t in eachindex(param_gate_idxs)
-            i       = param_gate_idxs[t]
-            gate    = ops[i]
-            r, s    = shift_params(gate)
-            f_plus  = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate,  s)), tape.measurements), dev, T)
-            f_minus = execute_tape(TypedTape(_replace_tuple(ops, i, shift_gate(gate, -s)), tape.measurements), dev, T)
-            gradient[t] = r * (f_plus - f_minus)
+            i = param_gate_idxs[t]
+            gradient[t] = _parameter_shift_component(ops, tape.measurements, i, dev, T)
         end
     end
     return gradient
