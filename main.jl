@@ -148,10 +148,16 @@ struct ProbsProcess <: AbstractMeasurement
     wires::Vector{Int}
 end
 
+struct MeasureInstruction <: AbstractMeasurement
+    wires::Vector{Int}
+    key::String
+end
+
 # Wire accessor — dispatch so validate_tape doesn't need to know the internal layout
 measurement_wires(m::ExpvalProcess) = m.observable.wires
 measurement_wires(m::VarProcess)    = m.observable.wires
 measurement_wires(m::ProbsProcess)  = m.wires
+measurement_wires(m::MeasureInstruction) = m.wires
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Tape  –  ordered record of gates + measurements
@@ -196,12 +202,6 @@ end
 
 Device(n::Integer) = Device(collect(1:Int(n)))
 
-function initialize_state(n::Int, ::Type{T}=Float64) where {T<:Real}
-    ψ = zeros(Complex{T}, 2^n)
-    ψ[1] = one(Complex{T})
-    return ψ
-end
-
 mutable struct Machine{T<:Real}
     device::Device
     state::Vector{Complex{T}}
@@ -209,8 +209,10 @@ mutable struct Machine{T<:Real}
 end
 
 function Machine(device::Device, ::Type{T}=Float64) where {T<:Real}
-    state = initialize_state(length(device.wires), T)
-    return Machine{T}(device, state, Dict{String,Int}())
+    # initialize_state
+    ψ = zeros(Complex{T}, 2^length(device.wires))
+    ψ[1] = one(Complex{T})
+    return Machine{T}(device, ψ, Dict{String,Int}())
 end
 
 function _measurement_probs(ψ::Vector{CT}, wire_idx::Vector{Int}, n::Int) where {CT<:Complex}
@@ -238,7 +240,6 @@ function _sample_from_probs(probs_vec::AbstractVector{<:Real})
             return i
         end
     end
-    return lastindex(probs_vec)
 end
 
 function _collapse_state!(ψ::Vector{CT}, wire_idx::Vector{Int}, outcome::Int, n::Int) where {CT<:Complex}
@@ -268,25 +269,9 @@ function _collapse_state!(ψ::Vector{CT}, wire_idx::Vector{Int}, outcome::Int, n
     return ψ
 end
 
-struct MeasureInstruction
-    wires::Vector{Int}
-    key::String
-end
-
 Measure(; wires, key::AbstractString="") = MeasureInstruction(_wire_vec(wires), isempty(key) ? join(_wire_vec(wires), ",") : String(key))
 
-struct ConditionalInstruction
-    key::String
-    value::Int
-    then_program::Tuple
-    else_program::Tuple
-end
-
-function ConditionalInstruction(; key, value::Integer, then_program=(), else_program=())
-    return ConditionalInstruction(String(key), Int(value), Tuple(then_program), Tuple(else_program))
-end
-
-function observe!(machine::Machine{T}, wires::Vector{Int}; key::Union{Nothing,AbstractString}=nothing) where {T<:Real}
+function _observe_measurement!(machine::Machine{T}, wires::Vector{Int}; key::Union{Nothing,AbstractString}=nothing) where {T<:Real}
     probs_vec = _measurement_probs(machine.state, wires, length(machine.device.wires))
     sampled = _sample_from_probs(probs_vec)
     outcome = sampled - 1
@@ -296,61 +281,17 @@ function observe!(machine::Machine{T}, wires::Vector{Int}; key::Union{Nothing,Ab
     return outcome
 end
 
-observe!(machine::Machine, meas::MeasureInstruction) = observe!(machine, meas.wires; key=meas.key)
+_observe_measurement!(machine::Machine, meas::MeasureInstruction) = _observe_measurement!(machine, meas.wires; key=meas.key)
+
+apply_measurement(meas::AbstractMeasurement, machine::Machine{T}, n::Int) where {T<:Real} =
+    apply_measurement(meas, machine.state, measurement_wires(meas), n)
+
+apply_measurement(meas::MeasureInstruction, machine::Machine{T}, ::Int) where {T<:Real} = _observe_measurement!(machine, meas)
 
 _store_result!(::Nothing, value) = nothing
 _store_result!(results::Vector{Any}, value) = push!(results, value)
 
-function _max_gate_arity(program)
-    max_k = 1
-    for instruction in program
-        if instruction isa AbstractGate
-            max_k = max(max_k, length(instruction.wires))
-        elseif instruction isa ConditionalInstruction
-            max_k = max(max_k, _max_gate_arity(instruction.then_program), _max_gate_arity(instruction.else_program))
-        end
-    end
-    return max_k
-end
-
-function _run_program_block!(machine::Machine{T}, program, buf::Vector{Complex{T}}, results::Union{Nothing,Vector{Any}}=nothing) where {T<:Real}
-    for instruction in program
-        if instruction isa AbstractGate
-            apply_gate!(gate_matrix(instruction), machine.state, instruction.wires, length(machine.device.wires), buf)
-        elseif instruction isa MeasureInstruction
-            outcome = observe!(machine, instruction)
-            _store_result!(results, outcome)
-        elseif instruction isa AbstractMeasurement
-            value = apply_measurement(
-                instruction,
-                machine.state,
-                measurement_wires(instruction),
-                length(machine.device.wires),
-            )
-            _store_result!(results, value)
-        elseif instruction isa ConditionalInstruction
-            haskey(machine.classical_register, instruction.key) || error(
-                "Conditional instruction references missing classical key \"$(instruction.key)\"."
-            )
-            branch = machine.classical_register[instruction.key] == instruction.value ?
-                instruction.then_program : instruction.else_program
-            _run_program_block!(machine, branch, buf, results)
-        else
-            error("Unsupported instruction type: $(typeof(instruction))")
-        end
-    end
-    return machine
-end
-
-function execute_program!(machine::Machine{T}, program; collect_results::Bool=false) where {T<:Real}
-    max_k = _max_gate_arity(program)
-    buf = Vector{Complex{T}}(undef, 2^max_k)
-    results = collect_results ? Any[] : nothing
-    _run_program_block!(machine, program, buf, results)
-    return collect_results ? results : machine
-end
-
-function execute_program!(machine::Machine{T}, tape::TypedTape; collect_results::Bool=true) where {T<:Real}
+function execute_tape!(machine::Machine{T}, tape::TypedTape; collect_results::Bool=true) where {T<:Real}
     n = length(machine.device.wires)
     max_k = isempty(tape.operations) ? 1 : maximum(length(g.wires) for g in tape.operations)
     buf = Vector{Complex{T}}(undef, 2^max_k)
@@ -361,18 +302,9 @@ function execute_program!(machine::Machine{T}, tape::TypedTape; collect_results:
         return machine
     end
     results = map(tape.measurements) do meas
-        apply_measurement(meas, machine.state, measurement_wires(meas), n)
+        apply_measurement(meas, machine, n)
     end
     return length(results) == 1 ? only(results) : results
-end
-
-function run_program!(machine::Machine{T}, program) where {T<:Real}
-    execute_program!(machine, program)
-    return machine
-end
-
-function run_program_with_results!(machine::Machine{T}, program) where {T<:Real}
-    return execute_program!(machine, program; collect_results=true)
 end
 
 # apply_1q_gate!
@@ -552,7 +484,7 @@ end
 #   and by grad to evaluate shifted tapes without re-executing qfunc.
 function execute_tape(tape::TypedTape, dev::Device, ::Type{T}=Float64) where {T<:Real}
     machine = Machine(dev, T)
-    return execute_program!(machine, tape; collect_results=true)
+    return execute_tape!(machine, tape; collect_results=true)
 end
 
 @inline function _parameter_shift_component(
